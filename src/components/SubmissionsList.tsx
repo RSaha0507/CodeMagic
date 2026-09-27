@@ -1,105 +1,25 @@
-import React, { useState, useEffect } from 'react';
-import { History, CheckCircle2, XCircle, Clock, Cpu, Code2 } from 'lucide-react';
-import { Submission } from '../types';
+import React, { useEffect, useState } from 'react';
+import type { Submission } from '../types';
+import { Badge } from './ui/badge';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 
-export const SubmissionsList: React.FC = () => {
+interface SubmissionsListProps { isAuthenticated: boolean; }
+
+export function SubmissionsList({ isAuthenticated }: SubmissionsListProps) {
   const [submissions, setSubmissions] = useState<Submission[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(isAuthenticated);
 
   useEffect(() => {
-    fetchSubmissions();
-  }, []);
+    if (!isAuthenticated) { setSubmissions([]); setLoading(false); return; }
+    setLoading(true);
+    void fetch('/api/submissions', { credentials: 'same-origin' })
+      .then(response => response.ok ? response.json() : [])
+      .then(setSubmissions)
+      .finally(() => setLoading(false));
+  }, [isAuthenticated]);
 
-  const fetchSubmissions = async () => {
-    try {
-      const res = await fetch('/api/submissions');
-      if (res.ok) {
-        const data = await res.json();
-        setSubmissions(data);
-      }
-    } catch (e) {
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8 space-y-6">
-      <div className="flex items-center space-x-3">
-        <div className="p-3 bg-purple-500/10 border border-purple-500/20 rounded-2xl text-purple-400">
-          <History className="w-6 h-6" />
-        </div>
-        <div>
-          <h2 className="text-xl font-bold text-white">Recent Judge Submissions</h2>
-          <p className="text-xs text-slate-400">Live feed of all evaluated code submissions</p>
-        </div>
-      </div>
-
-      <div className="bg-[#0f172a] border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
-        <table className="w-full text-left text-sm">
-          <thead className="bg-[#131b2e] border-b border-slate-800 text-xs font-semibold text-slate-400 uppercase tracking-wider">
-            <tr>
-              <th className="py-3.5 px-4">Status</th>
-              <th className="py-3.5 px-4">Problem</th>
-              <th className="py-3.5 px-4">User</th>
-              <th className="py-3.5 px-4">Runtime</th>
-              <th className="py-3.5 px-4">Memory</th>
-              <th className="py-3.5 px-4">Language</th>
-              <th className="py-3.5 px-4 text-right">Time</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-800/60 font-mono text-xs">
-            {loading ? (
-              <tr>
-                <td colSpan={7} className="py-12 text-center text-slate-500 text-xs font-sans">
-                  Loading submissions...
-                </td>
-              </tr>
-            ) : submissions.length === 0 ? (
-              <tr>
-                <td colSpan={7} className="py-12 text-center text-slate-500 text-xs font-sans">
-                  No submissions yet. Solve a problem to submit your code!
-                </td>
-              </tr>
-            ) : (
-              submissions.map((s) => (
-                <tr key={s.id} className="hover:bg-slate-800/30 transition">
-                  <td className="py-4 px-4 font-sans font-bold">
-                    <div className="flex items-center space-x-2">
-                      {s.status === 'Accepted' ? (
-                        <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                      ) : (
-                        <XCircle className="w-4 h-4 text-rose-400" />
-                      )}
-                      <span className={s.status === 'Accepted' ? 'text-emerald-400' : 'text-rose-400'}>
-                        {s.status}
-                      </span>
-                    </div>
-                  </td>
-                  <td className="py-4 px-4 font-sans font-medium text-slate-200">
-                    {s.problemTitle}
-                  </td>
-                  <td className="py-4 px-4 font-sans text-slate-300">
-                    {s.userName}
-                  </td>
-                  <td className="py-4 px-4 text-slate-300">
-                    {s.runtimeMs} ms
-                  </td>
-                  <td className="py-4 px-4 text-slate-300">
-                    {Math.round(s.memoryKb / 1024)} MB
-                  </td>
-                  <td className="py-4 px-4 uppercase text-purple-300">
-                    {s.language}
-                  </td>
-                  <td className="py-4 px-4 text-right font-sans text-slate-500 text-[11px]">
-                    {new Date(s.createdAt).toLocaleTimeString()}
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-};
+  return <div className="mx-auto max-w-6xl space-y-6 px-4 py-8 sm:px-6">
+    <div><h1 className="text-2xl font-semibold tracking-tight text-zinc-100">Submission history</h1><p className="mt-1 text-sm text-zinc-400">Your private record of verified practice attempts.</p></div>
+    <Card className="overflow-hidden"><CardHeader className="border-b border-zinc-800 bg-zinc-900/40 py-4"><CardTitle className="text-sm">Your attempts</CardTitle><CardDescription className="text-xs">The current development build does not execute code; future verified results will appear here.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-sm"><thead className="border-b border-zinc-800 text-xs uppercase tracking-wide text-zinc-500"><tr><th className="px-5 py-3">Status</th><th className="px-5 py-3">Problem</th><th className="px-5 py-3">Language</th><th className="px-5 py-3">Runtime</th><th className="px-5 py-3">Memory</th><th className="px-5 py-3 text-right">Submitted</th></tr></thead><tbody className="divide-y divide-zinc-800/80">{loading ? <tr><td colSpan={6} className="px-5 py-14 text-center text-zinc-500">Loading submissions...</td></tr> : !isAuthenticated ? <tr><td colSpan={6} className="px-5 py-14 text-center text-zinc-500">Sign in to view your submission history.</td></tr> : submissions.length === 0 ? <tr><td colSpan={6} className="px-5 py-14 text-center text-zinc-500">No verified submissions yet.</td></tr> : submissions.map(submission => <tr key={submission.id} className="hover:bg-zinc-900/50"><td className="px-5 py-4"><Badge variant={submission.status === 'Accepted' ? 'success' : 'danger'}>{submission.status}</Badge></td><td className="px-5 py-4 font-medium text-zinc-200">{submission.problemTitle}</td><td className="px-5 py-4 font-mono text-xs uppercase text-zinc-300">{submission.language}</td><td className="px-5 py-4 font-mono text-xs text-zinc-400">{submission.runtimeMs} ms</td><td className="px-5 py-4 font-mono text-xs text-zinc-400">{Math.round(submission.memoryKb / 1024)} MB</td><td className="px-5 py-4 text-right text-xs text-zinc-500">{new Date(submission.createdAt).toLocaleString()}</td></tr>)}</tbody></table></div></CardContent></Card>
+  </div>;
+}

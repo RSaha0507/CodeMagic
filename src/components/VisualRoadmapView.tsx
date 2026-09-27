@@ -1,0 +1,20 @@
+import React from 'react';
+import { algorithmsCatalog } from '../data/algorithmsData';
+import { careerTracks, roadmapNodes } from '../data/roadmapData';
+import { Badge } from './ui/badge';
+import { Button } from './ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
+
+interface VisualRoadmapViewProps {
+  onSelectAlgorithm: (algorithmId: string) => void;
+  completedAlgorithms?: string[];
+}
+
+export function VisualRoadmapView({ onSelectAlgorithm, completedAlgorithms = [] }: VisualRoadmapViewProps) {
+  const track = careerTracks[0];
+  return <div className="mx-auto max-w-5xl space-y-8 px-4 py-8 sm:px-6">
+    <Card><CardHeader className="gap-4"><span className="text-xs font-mono uppercase tracking-wide text-zinc-500">Learning pathway</span><div><h1 className="text-2xl font-semibold tracking-tight text-zinc-100 sm:text-3xl">{track.title}</h1><CardDescription className="mt-2 max-w-2xl">{track.description}</CardDescription></div><div className="flex flex-wrap gap-3 text-xs text-zinc-400"><span>{track.roleTarget}</span><span>{roadmapNodes.length} milestones</span><span>{track.estimatedHours} hours</span></div></CardHeader></Card>
+    <section className="space-y-4"><div><h2 className="text-sm font-semibold text-zinc-200">Visualizer catalog</h2><p className="mt-1 text-sm text-zinc-500">Learn each pattern by observing the algorithm state change step by step.</p></div><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{Object.values(algorithmsCatalog).map(algorithm => { const completed = completedAlgorithms.includes(algorithm.id); return <Card key={algorithm.id} className="flex flex-col transition-colors hover:border-zinc-700"><CardHeader className="flex-1 gap-3 p-4"><div className="flex items-center justify-between"><span className="font-mono text-[10px] uppercase text-zinc-500">{algorithm.structureType}</span><span className="font-mono text-[11px] text-zinc-400">{algorithm.timeComplexity.average}</span></div><div><CardTitle>{algorithm.title}</CardTitle><CardDescription className="mt-2 line-clamp-3 text-xs leading-5">{algorithm.description}</CardDescription></div></CardHeader><CardContent className="flex items-center justify-between border-t border-zinc-800 p-4 pt-3"><span className="text-xs text-zinc-500">{algorithm.interviewFrequency}{completed ? ' completed' : ''}</span><Button size="sm" variant="ghost" onClick={() => onSelectAlgorithm(algorithm.id)}>Open</Button></CardContent></Card>; })}</div></section>
+    <section className="space-y-4"><div><h2 className="text-sm font-semibold text-zinc-200">Recommended sequence</h2><p className="mt-1 text-sm text-zinc-500">Each stage builds on the mental model from the previous one.</p></div><ol className="space-y-3 border-l border-zinc-800 pl-5 sm:pl-7">{roadmapNodes.map(node => { const completed = completedAlgorithms.includes(node.algorithmId); return <li key={node.id} className="relative"><span className="absolute -left-[2.15rem] top-5 grid size-7 place-items-center rounded-full border border-zinc-700 bg-zinc-950 text-xs font-mono text-zinc-400 sm:-left-[2.65rem]">{completed ? 'Done' : node.level}</span><Card><CardHeader className="gap-2 p-5"><div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start"><div><span className="mb-2 block text-[10px] uppercase tracking-wide text-zinc-500">Stage {node.level}, {node.category}</span><CardTitle className="text-base">{node.title}</CardTitle></div><Button size="sm" onClick={() => onSelectAlgorithm(node.algorithmId)}>Visualize</Button></div><CardDescription className="text-sm">{node.summary}</CardDescription></CardHeader><CardContent className="space-y-3 p-5 pt-0"><div className="flex flex-wrap gap-1.5">{node.keyConcepts.map(concept => <Badge key={concept} variant="secondary" className="font-mono text-[10px]">{concept}</Badge>)}</div><div className="flex flex-col gap-1 border-t border-zinc-800 pt-3 text-xs text-zinc-500 sm:flex-row sm:justify-between"><span>Prerequisites: <span className="text-zinc-300">{node.prerequisites.join(', ')}</span></span><span>{node.badge}</span></div></CardContent></Card></li>; })}</ol></section>
+  </div>;
+}

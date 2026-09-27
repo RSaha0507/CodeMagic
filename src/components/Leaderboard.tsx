@@ -1,124 +1,23 @@
-import React, { useState, useEffect } from 'react';
-import { Trophy, Medal, Flame, Star, ShieldCheck } from 'lucide-react';
-import { LeaderboardUser } from '../types';
+import React, { useEffect, useState } from 'react';
+import type { LeaderboardUser } from '../types';
+import { Badge } from './ui/badge';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 
-export const Leaderboard: React.FC = () => {
+export function Leaderboard() {
   const [users, setUsers] = useState<LeaderboardUser[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetchLeaderboard();
+    void fetch('/api/leaderboard', { credentials: 'same-origin' })
+      .then(response => response.ok ? response.json() : [])
+      .then(setUsers)
+      .finally(() => setLoading(false));
   }, []);
 
-  const fetchLeaderboard = async () => {
-    try {
-      const res = await fetch('/api/leaderboard');
-      if (res.ok) {
-        const data = await res.json();
-        setUsers(data);
-      }
-    } catch (e) {
-    } finally {
-      setLoading(false);
-    }
-  };
+  const tier = (score: number) => score >= 200 ? 'Grandmaster' : score >= 100 ? 'Master' : score >= 50 ? 'Knight' : 'Apprentice';
 
-  const getRankBadge = (rank: number) => {
-    switch (rank) {
-      case 1:
-        return <Medal className="w-5 h-5 text-amber-400" />;
-      case 2:
-        return <Medal className="w-5 h-5 text-slate-300" />;
-      case 3:
-        return <Medal className="w-5 h-5 text-amber-600" />;
-      default:
-        return <span className="text-slate-500 font-mono text-sm">#{rank}</span>;
-    }
-  };
-
-  const getTier = (score: number) => {
-    if (score >= 200) return { title: 'Grandmaster', color: 'text-rose-400 bg-rose-500/10 border-rose-500/30' };
-    if (score >= 100) return { title: 'Master', color: 'text-purple-400 bg-purple-500/10 border-purple-500/30' };
-    if (score >= 50) return { title: 'Knight', color: 'text-indigo-400 bg-indigo-500/10 border-indigo-500/30' };
-    return { title: 'Apprentice', color: 'text-slate-400 bg-slate-500/10 border-slate-500/30' };
-  };
-
-  return (
-    <div className="max-w-4xl mx-auto px-4 sm:px-6 py-8 space-y-6">
-      <div className="text-center space-y-2">
-        <div className="inline-flex p-3 bg-purple-500/10 border border-purple-500/20 rounded-2xl text-purple-400">
-          <Trophy className="w-8 h-8" />
-        </div>
-        <h2 className="text-2xl font-extrabold text-white">Global Leaderboard</h2>
-        <p className="text-xs text-slate-400">Top competitive programmers on CodeMagic ranked by score & accuracy</p>
-      </div>
-
-      <div className="bg-[#0f172a] border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
-        <table className="w-full text-left text-sm">
-          <thead className="bg-[#131b2e] border-b border-slate-800 text-xs font-semibold text-slate-400 uppercase tracking-wider">
-            <tr>
-              <th className="py-3.5 px-4 w-16 text-center">Rank</th>
-              <th className="py-3.5 px-4">User</th>
-              <th className="py-3.5 px-4">Tier</th>
-              <th className="py-3.5 px-4 text-center">Solved</th>
-              <th className="py-3.5 px-4 text-right">Score</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-800/60">
-            {loading ? (
-              <tr>
-                <td colSpan={5} className="py-12 text-center text-slate-500 text-xs">
-                  Loading rankings...
-                </td>
-              </tr>
-            ) : users.length === 0 ? (
-              <tr>
-                <td colSpan={5} className="py-12 text-center text-slate-500 text-xs">
-                  No ranked users yet.
-                </td>
-              </tr>
-            ) : (
-              users.map((u, idx) => {
-                const tier = getTier(u.score);
-                return (
-                  <tr key={u.id} className="hover:bg-slate-800/30 transition">
-                    <td className="py-4 px-4 text-center font-bold">
-                      <div className="flex items-center justify-center">
-                        {getRankBadge(idx + 1)}
-                      </div>
-                    </td>
-                    <td className="py-4 px-4">
-                      <div className="flex items-center space-x-3">
-                        <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-purple-600 to-indigo-600 flex items-center justify-center text-xs font-bold text-white">
-                          {u.name.charAt(0).toUpperCase()}
-                        </div>
-                        <div>
-                          <span className="font-semibold text-slate-200 block">{u.name}</span>
-                          <span className="text-[11px] text-slate-500">{u.email}</span>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="py-4 px-4">
-                      <span className={`text-[11px] font-semibold px-2.5 py-0.5 rounded-full border ${tier.color}`}>
-                        {tier.title}
-                      </span>
-                    </td>
-                    <td className="py-4 px-4 text-center font-mono font-bold text-emerald-400">
-                      {u.solvedCount}
-                    </td>
-                    <td className="py-4 px-4 text-right font-mono font-bold text-amber-400">
-                      <span className="inline-flex items-center space-x-1">
-                        <Flame className="w-3.5 h-3.5 text-amber-500 fill-amber-500" />
-                        <span>{u.score} pts</span>
-                      </span>
-                    </td>
-                  </tr>
-                );
-              })
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-};
+  return <div className="mx-auto max-w-5xl space-y-6 px-4 py-8 sm:px-6">
+    <div><h1 className="text-2xl font-semibold tracking-tight text-zinc-100">Leaderboard</h1><p className="mt-1 text-sm text-zinc-400">Progress is ranked by completed practice problems and verified score.</p></div>
+    <Card className="overflow-hidden"><CardHeader className="border-b border-zinc-800 bg-zinc-900/40 py-4"><CardTitle className="text-sm">Rankings</CardTitle><CardDescription className="text-xs">Scores update when the future isolated judge verifies submissions.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><table className="w-full min-w-[600px] text-left text-sm"><thead className="border-b border-zinc-800 text-xs uppercase tracking-wide text-zinc-500"><tr><th className="w-20 px-5 py-3 text-center">Rank</th><th className="px-5 py-3">Learner</th><th className="px-5 py-3">Tier</th><th className="px-5 py-3 text-center">Solved</th><th className="px-5 py-3 text-right">Score</th></tr></thead><tbody className="divide-y divide-zinc-800/80">{loading ? <tr><td colSpan={5} className="px-5 py-14 text-center text-zinc-500">Loading rankings...</td></tr> : users.length === 0 ? <tr><td colSpan={5} className="px-5 py-14 text-center text-zinc-500">No ranked users yet.</td></tr> : users.map((user, index) => <tr key={user.id} className="hover:bg-zinc-900/50"><td className="px-5 py-4 text-center font-mono text-zinc-400">{index + 1}</td><td className="px-5 py-4"><div className="flex items-center gap-3"><span className="grid size-8 place-items-center rounded-md bg-zinc-800 text-xs font-semibold text-zinc-300">{user.name.charAt(0).toUpperCase()}</span><span className="font-medium text-zinc-200">{user.name}</span></div></td><td className="px-5 py-4"><Badge variant="secondary">{tier(user.score)}</Badge></td><td className="px-5 py-4 text-center font-mono text-zinc-300">{user.solvedCount}</td><td className="px-5 py-4 text-right font-mono font-medium text-zinc-200">{user.score}</td></tr>)}</tbody></table></div></CardContent></Card>
+  </div>;
+}

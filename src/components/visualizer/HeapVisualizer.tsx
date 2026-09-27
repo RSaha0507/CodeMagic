@@ -1,5 +1,4 @@
 import React from 'react';
-import { Network, Database } from 'lucide-react';
 import { VisualStep } from '../../types/visualizer';
 
 interface HeapVisualizerProps {
@@ -32,7 +31,6 @@ export const HeapVisualizer: React.FC<HeapVisualizerProps> = ({ currentStep }) =
       {/* 1. Binary Tree SVG Graph */}
       <div className="flex-1 flex flex-col items-center justify-center relative min-h-[220px]">
         <div className="absolute top-0 left-2 text-[11px] font-bold text-slate-400 flex items-center space-x-1.5">
-          <Network className="w-3.5 h-3.5 text-purple-400" />
           <span>Tree Representation</span>
         </div>
 
@@ -116,7 +114,6 @@ export const HeapVisualizer: React.FC<HeapVisualizerProps> = ({ currentStep }) =
       {/* 2. Backing 1D Array */}
       <div className="space-y-1.5">
         <div className="text-[11px] font-bold text-slate-400 flex items-center space-x-1.5">
-          <Database className="w-3.5 h-3.5 text-indigo-400" />
           <span>Backing 1D Memory Array</span>
         </div>
 

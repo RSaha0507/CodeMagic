@@ -1,5 +1,4 @@
 import React from 'react';
-import { Layers, ArrowDown } from 'lucide-react';
 import { VisualStep } from '../../types/visualizer';
 
 interface StackVisualizerProps {
@@ -18,7 +17,6 @@ export const StackVisualizer: React.FC<StackVisualizerProps> = ({ currentStep })
         {/* Stack Container */}
         <div className="flex flex-col items-center">
           <div className="text-xs font-bold text-slate-400 mb-2 flex items-center space-x-1.5">
-            <Layers className="w-4 h-4 text-purple-400" />
             <span>Stack (LIFO Structure)</span>
           </div>
 
@@ -27,7 +25,7 @@ export const StackVisualizer: React.FC<StackVisualizerProps> = ({ currentStep })
             {items.length > 0 && (
               <div className="flex items-center space-x-1 animate-pulse">
                 <span>TOP</span>
-                <ArrowDown className="w-3.5 h-3.5" />
+                <span>below</span>
               </div>
             )}
           </div>

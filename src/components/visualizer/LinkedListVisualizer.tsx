@@ -1,5 +1,4 @@
 import React from 'react';
-import { ArrowRight, CornerDownRight, CornerUpLeft } from 'lucide-react';
 import { VisualStep } from '../../types/visualizer';
 
 interface LinkedListVisualizerProps {
@@ -65,11 +64,7 @@ export const LinkedListVisualizer: React.FC<LinkedListVisualizerProps> = ({ curr
                 {/* Arrow to Next */}
                 {idx < nodes.length - 1 && (
                   <div className="flex flex-col items-center">
-                    <ArrowRight
-                      className={`w-6 h-6 transition-all duration-300 ${
-                        isHighlighted ? 'text-purple-400 scale-125' : 'text-slate-600'
-                      }`}
-                    />
+                    <span className={isHighlighted ? 'text-purple-400' : 'text-slate-600'}>next</span>
                   </div>
                 )}
               </div>
@@ -78,7 +73,7 @@ export const LinkedListVisualizer: React.FC<LinkedListVisualizerProps> = ({ curr
 
           {/* Null Terminator */}
           <div className="flex items-center space-x-2">
-            <ArrowRight className="w-5 h-5 text-slate-600" />
+            <span className="text-slate-600">next</span>
             <div className="px-3 py-2 bg-slate-950 border border-slate-800 text-slate-500 font-mono text-xs rounded-lg">
               NULL
             </div>

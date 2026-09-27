@@ -1,27 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import {
-  ArrowLeft,
-  Play,
-  Send,
-  Code,
-  CheckCircle2,
-  XCircle,
-  Clock,
-  Cpu,
-  RotateCcw,
-  Sparkles,
-  BookOpen,
-  HelpCircle,
-  Terminal,
-  ChevronRight,
-  Zap,
-} from 'lucide-react';
 import { ProblemDetail, Difficulty, Submission } from '../types';
+import { Badge } from './ui/badge';
+import { Button } from './ui/button';
 
 interface ProblemWorkspaceProps {
   problemId: string;
   onBack: () => void;
-  token: string | null;
+  csrfToken: string | null;
   onSolveSuccess: (problemId: string) => void;
   onRequireAuth: () => void;
 }
@@ -29,7 +14,7 @@ interface ProblemWorkspaceProps {
 export const ProblemWorkspace: React.FC<ProblemWorkspaceProps> = ({
   problemId,
   onBack,
-  token,
+  csrfToken,
   onSolveSuccess,
   onRequireAuth,
 }) => {
@@ -55,15 +40,19 @@ export const ProblemWorkspace: React.FC<ProblemWorkspaceProps> = ({
 
   // Fetch Problem
   useEffect(() => {
-    fetchProblem();
-    fetchProblemSubmissions();
-  }, [problemId]);
+    void fetchProblem();
+    if (csrfToken) {
+      void fetchProblemSubmissions();
+    } else {
+      setProblemSubmissions([]);
+    }
+  }, [problemId, csrfToken]);
 
   const fetchProblem = async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/problems/${problemId}`);
+      const res = await fetch(`/api/problems/${problemId}`, { credentials: 'same-origin' });
       if (!res.ok) throw new Error('Problem not found');
       const data: ProblemDetail = await res.json();
       setProblem(data);
@@ -80,7 +69,7 @@ export const ProblemWorkspace: React.FC<ProblemWorkspaceProps> = ({
 
   const fetchProblemSubmissions = async () => {
     try {
-      const res = await fetch(`/api/submissions?problemId=${problemId}`);
+      const res = await fetch(`/api/submissions?problemId=${problemId}`, { credentials: 'same-origin' });
       if (res.ok) {
         const data = await res.json();
         setProblemSubmissions(data);
@@ -102,12 +91,20 @@ export const ProblemWorkspace: React.FC<ProblemWorkspaceProps> = ({
   };
 
   const handleRunCode = async () => {
+    if (!csrfToken) {
+      onRequireAuth();
+      return;
+    }
     setIsRunning(true);
     setBottomTab('result');
     try {
       const res = await fetch(`/api/problems/${problemId}/run`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrfToken,
+        },
         body: JSON.stringify({
           code,
           language,
@@ -115,7 +112,7 @@ export const ProblemWorkspace: React.FC<ProblemWorkspaceProps> = ({
         }),
       });
       const data = await res.json();
-      setRunResults(data);
+      setRunResults(res.ok ? data : { error: data.detail || 'Unable to run code.' });
     } catch (err: any) {
       setRunResults({ error: err.message });
     } finally {
@@ -124,14 +121,19 @@ export const ProblemWorkspace: React.FC<ProblemWorkspaceProps> = ({
   };
 
   const handleSubmitCode = async () => {
+    if (!csrfToken) {
+      onRequireAuth();
+      return;
+    }
     setIsSubmitting(true);
     setBottomTab('result');
     try {
       const res = await fetch(`/api/problems/${problemId}/submit`, {
         method: 'POST',
+        credentials: 'same-origin',
         headers: {
           'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          'X-CSRF-Token': csrfToken,
         },
         body: JSON.stringify({
           code,
@@ -139,7 +141,9 @@ export const ProblemWorkspace: React.FC<ProblemWorkspaceProps> = ({
         }),
       });
       const data = await res.json();
-      if (data.submission) {
+      if (!res.ok) {
+        setRunResults({ error: data.detail || 'Unable to submit code.' });
+      } else if (data.submission) {
         setLastSubmission(data.submission);
         if (data.submission.status === 'Accepted') {
           onSolveSuccess(problemId);
@@ -168,12 +172,9 @@ export const ProblemWorkspace: React.FC<ProblemWorkspaceProps> = ({
         <div className="p-4 bg-rose-500/10 border border-rose-500/20 rounded-2xl text-rose-300">
           {error || 'Problem not found.'}
         </div>
-        <button
-          onClick={onBack}
-          className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-xl"
-        >
+        <Button variant="outline" size="sm" onClick={onBack}>
           Return to problem list
-        </button>
+        </Button>
       </div>
     );
   }
@@ -194,45 +195,23 @@ export const ProblemWorkspace: React.FC<ProblemWorkspaceProps> = ({
       {/* Top action bar */}
       <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-3">
         <div className="flex items-center space-x-3">
-          <button
-            onClick={onBack}
-            className="flex items-center space-x-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs font-medium rounded-lg border border-slate-800 transition"
-          >
-            <ArrowLeft className="w-3.5 h-3.5" />
-            <span>Problems</span>
-          </button>
+          <Button variant="outline" size="sm" onClick={onBack}>Problems</Button>
           <div className="h-4 w-px bg-slate-800" />
           <h1 className="text-base font-bold text-white flex items-center space-x-2">
             <span>{problem.title}</span>
-            <span
-              className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${getDifficultyBadge(
-                problem.difficulty
-              )}`}
-            >
-              {problem.difficulty}
-            </span>
+            <Badge className={getDifficultyBadge(problem.difficulty)}>{problem.difficulty}</Badge>
           </h1>
         </div>
 
         {/* Action Buttons: Run & Submit */}
         <div className="flex items-center space-x-2">
-          <button
-            onClick={handleRunCode}
-            disabled={isRunning || isSubmitting}
-            className="flex items-center space-x-1.5 px-3.5 py-1.5 text-xs font-semibold text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg shadow-sm transition disabled:opacity-50"
-          >
-            <Play className={`w-3.5 h-3.5 text-emerald-400 ${isRunning ? 'animate-spin' : ''}`} />
+          <Button variant="outline" size="sm" onClick={handleRunCode} disabled={isRunning || isSubmitting}>
             <span>{isRunning ? 'Running...' : 'Run Code'}</span>
-          </button>
+          </Button>
 
-          <button
-            onClick={handleSubmitCode}
-            disabled={isRunning || isSubmitting}
-            className="flex items-center space-x-1.5 px-4 py-1.5 text-xs font-semibold text-white bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 rounded-lg shadow-md shadow-purple-600/20 transition hover:scale-[1.02] disabled:opacity-50"
-          >
-            <Send className={`w-3.5 h-3.5 ${isSubmitting ? 'animate-pulse' : ''}`} />
+          <Button size="sm" onClick={handleSubmitCode} disabled={isRunning || isSubmitting}>
             <span>{isSubmitting ? 'Submitting...' : 'Submit Solution'}</span>
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -251,7 +230,6 @@ export const ProblemWorkspace: React.FC<ProblemWorkspaceProps> = ({
                     : 'border-transparent text-slate-400 hover:text-slate-200'
                 }`}
               >
-                <BookOpen className="w-3.5 h-3.5" />
                 <span>Description</span>
               </button>
 
@@ -263,7 +241,6 @@ export const ProblemWorkspace: React.FC<ProblemWorkspaceProps> = ({
                     : 'border-transparent text-slate-400 hover:text-slate-200'
                 }`}
               >
-                <Sparkles className="w-3.5 h-3.5 text-amber-400" />
                 <span>Editorial</span>
               </button>
 
@@ -275,7 +252,6 @@ export const ProblemWorkspace: React.FC<ProblemWorkspaceProps> = ({
                     : 'border-transparent text-slate-400 hover:text-slate-200'
                 }`}
               >
-                <Clock className="w-3.5 h-3.5" />
                 <span>Submissions ({problemSubmissions.length})</span>
               </button>
             </div>
@@ -351,7 +327,6 @@ export const ProblemWorkspace: React.FC<ProblemWorkspaceProps> = ({
               <div className="space-y-4 text-xs">
                 <div className="p-4 bg-purple-950/20 border border-purple-800/30 rounded-xl space-y-2">
                   <h4 className="font-bold text-purple-300 flex items-center space-x-2">
-                    <Sparkles className="w-4 h-4 text-purple-400" />
                     <span>Algorithmic Approach & Complexity</span>
                   </h4>
                   <p className="text-slate-300 leading-relaxed">
@@ -388,11 +363,6 @@ export const ProblemWorkspace: React.FC<ProblemWorkspaceProps> = ({
                       className="bg-slate-950 border border-slate-800 p-3 rounded-xl flex items-center justify-between text-xs font-mono"
                     >
                       <div className="flex items-center space-x-2.5">
-                        {sub.status === 'Accepted' ? (
-                          <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                        ) : (
-                          <XCircle className="w-4 h-4 text-rose-400" />
-                        )}
                         <div>
                           <div
                             className={`font-bold ${
@@ -424,7 +394,6 @@ export const ProblemWorkspace: React.FC<ProblemWorkspaceProps> = ({
           {/* Editor Header & Control */}
           <div className="bg-[#0f172a] border border-slate-800 rounded-xl flex items-center justify-between px-4 py-2 text-xs">
             <div className="flex items-center space-x-3">
-              <Code className="w-4 h-4 text-purple-400" />
               <label className="text-slate-400 font-medium">Language:</label>
               <select
                 value={language}
@@ -444,7 +413,6 @@ export const ProblemWorkspace: React.FC<ProblemWorkspaceProps> = ({
               title="Reset starter template"
               className="flex items-center space-x-1 text-slate-400 hover:text-slate-200 p-1 rounded transition"
             >
-              <RotateCcw className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">Reset</span>
             </button>
           </div>
@@ -476,7 +444,6 @@ export const ProblemWorkspace: React.FC<ProblemWorkspaceProps> = ({
                       : 'border-transparent text-slate-400 hover:text-slate-200'
                   }`}
                 >
-                  <Terminal className="w-3.5 h-3.5" />
                   <span>Testcase</span>
                 </button>
 
@@ -488,7 +455,6 @@ export const ProblemWorkspace: React.FC<ProblemWorkspaceProps> = ({
                       : 'border-transparent text-slate-400 hover:text-slate-200'
                   }`}
                 >
-                  <Zap className="w-3.5 h-3.5" />
                   <span>Run / Judge Result</span>
                 </button>
               </div>
@@ -571,11 +537,6 @@ export const ProblemWorkspace: React.FC<ProblemWorkspaceProps> = ({
                     <div className="mb-4 p-3.5 rounded-xl border bg-slate-950">
                       <div className="flex items-center justify-between mb-2">
                         <div className="flex items-center space-x-2">
-                          {lastSubmission.status === 'Accepted' ? (
-                            <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                          ) : (
-                            <XCircle className="w-5 h-5 text-rose-400" />
-                          )}
                           <span
                             className={`text-sm font-bold ${
                               lastSubmission.status === 'Accepted'
@@ -588,11 +549,9 @@ export const ProblemWorkspace: React.FC<ProblemWorkspaceProps> = ({
                         </div>
                         <div className="flex items-center space-x-3 text-slate-400 text-xs">
                           <span className="flex items-center space-x-1">
-                            <Clock className="w-3.5 h-3.5 text-purple-400" />
                             <span>{lastSubmission.runtimeMs} ms</span>
                           </span>
                           <span className="flex items-center space-x-1">
-                            <Cpu className="w-3.5 h-3.5 text-indigo-400" />
                             <span>{Math.round(lastSubmission.memoryKb / 1024)} MB</span>
                           </span>
                         </div>
@@ -611,7 +570,11 @@ export const ProblemWorkspace: React.FC<ProblemWorkspaceProps> = ({
                   )}
 
                   {/* Run Output */}
-                  {runResults ? (
+                  {runResults?.error ? (
+                    <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
+                      {runResults.error}
+                    </div>
+                  ) : runResults ? (
                     <div className="space-y-3">
                       <div className="flex items-center justify-between text-xs">
                         <span className="font-bold text-slate-300">

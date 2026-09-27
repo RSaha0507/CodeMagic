@@ -1,19 +1,86 @@
 import express, { Request, Response, NextFunction } from 'express';
-import cors from 'cors';
+import cookieParser from 'cookie-parser';
+import 'dotenv/config';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import rateLimit from 'express-rate-limit';
+import helmet from 'helmet';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { z } from 'zod';
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
+const PORT = process.env.PORT ? Number.parseInt(process.env.PORT, 10) : 3000;
+const isProduction = process.env.NODE_ENV === 'production';
+const SESSION_COOKIE = 'codemagic_session';
+const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+function getJwtSecret(): string {
+  const secret = process.env.JWT_SECRET;
+  if (!secret || secret.length < 32) {
+    throw new Error('JWT_SECRET must be set to a unique value of at least 32 characters.');
+  }
+  return secret;
+}
+
+const JWT_SECRET = getJwtSecret();
 const app = express();
-const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
-const JWT_SECRET = process.env.JWT_SECRET || 'SUPER_SECRET_KEY_123';
 
-app.use(cors());
-app.use(express.json());
+app.disable('x-powered-by');
+app.use(
+  helmet({
+    contentSecurityPolicy: isProduction
+      ? {
+          directives: {
+            baseUri: ["'self'"],
+            defaultSrc: ["'self'"],
+            fontSrc: ["'self'"],
+            formAction: ["'self'"],
+            frameAncestors: ["'none'"],
+            imgSrc: ["'self'", 'data:'],
+            objectSrc: ["'none'"],
+            scriptSrc: ["'self'"],
+            styleSrc: ["'self'"],
+            connectSrc: ["'self'"],
+            upgradeInsecureRequests: [],
+          },
+        }
+      : false,
+    crossOriginEmbedderPolicy: false,
+  })
+);
+app.use((_req, res, next) => {
+  res.setHeader('Permissions-Policy', 'camera=(), geolocation=(), microphone=()');
+  next();
+});
+app.use(express.json({ limit: '100kb' }));
+app.use(cookieParser());
+
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 120,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { detail: 'Too many requests. Please try again later.' },
+});
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { detail: 'Too many authentication attempts. Please try again later.' },
+});
+const writeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { detail: 'Too many write requests. Please try again later.' },
+});
+
+app.use('/api', apiLimiter);
 
 // In-Memory Data Models & Seed Data
 interface User {
@@ -65,7 +132,6 @@ interface Submission {
   problemId: string;
   problemTitle: string;
   userId: string;
-  userEmail: string;
   userName: string;
   language: string;
   code: string;
@@ -78,23 +144,16 @@ interface Submission {
   errorDetail?: string;
 }
 
+interface Session {
+  userId: string;
+  expiresAt: number;
+}
+
 // Initial In-Memory Store
 const users: Map<string, User> = new Map();
 const problems: Map<string, Problem> = new Map();
 const submissions: Submission[] = [];
-
-// Seed default demo user
-const demoPasswordHash = bcrypt.hashSync('codemagic123', 10);
-const demoUser: User = {
-  id: 'usr-1',
-  email: 'coder@codemagic.io',
-  name: 'CodeWizard',
-  hashedPassword: demoPasswordHash,
-  solvedProblemIds: ['two-sum', 'valid-parentheses'],
-  createdAt: new Date(Date.now() - 7 * 86400000).toISOString(),
-  score: 120,
-};
-users.set(demoUser.id, demoUser);
+const sessions: Map<string, Session> = new Map();
 
 // Seed Rich Problem Set
 const initialProblems: Problem[] = [
@@ -359,25 +418,112 @@ const initialProblems: Problem[] = [
 
 initialProblems.forEach(p => problems.set(p.id, p));
 
-// Authentication Middleware
-interface AuthRequest extends Request {
-  user?: User;
+// This account exists only in the in-memory development shell. It is deliberately
+// excluded from production, where startup is disabled until durable auth exists.
+if (!isProduction && process.env.NODE_ENV !== 'test') {
+  const demoUser: User = {
+    id: 'usr-demo-codemagic',
+    email: 'demo@codemagic.local',
+    name: 'Demo Learner',
+    hashedPassword: '$2a$12$JD3xImCFmu3NQBa.uVm7ouxQxKWvnsXPMyWY7lYxcW60CPt7U73..',
+    solvedProblemIds: ['two-sum', 'valid-parentheses'],
+    createdAt: '2026-01-01T00:00:00.000Z',
+    score: 100,
+  };
+  users.set(demoUser.id, demoUser);
 }
 
+const registrationSchema = z.object({
+  email: z.string().trim().toLowerCase().email().max(254),
+  password: z.string().min(12).max(128),
+  name: z.string().trim().min(1).max(60).optional(),
+}).strict();
+
+const loginSchema = z.object({
+  email: z.string().trim().toLowerCase().email().max(254),
+  password: z.string().min(1).max(128),
+}).strict();
+
+function toPublicUser(user: User) {
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    score: user.score,
+    solvedProblemIds: user.solvedProblemIds,
+  };
+}
+
+function findUserByEmail(email: string): User | undefined {
+  return Array.from(users.values()).find(user => user.email === email);
+}
+
+function removeExpiredSessions(): void {
+  const now = Date.now();
+  for (const [sessionId, session] of sessions) {
+    if (session.expiresAt <= now) sessions.delete(sessionId);
+  }
+}
+
+function issueSession(res: Response, user: User): string {
+  removeExpiredSessions();
+  const csrfToken = randomBytes(32).toString('base64url');
+  const sessionId = randomUUID();
+  sessions.set(sessionId, { userId: user.id, expiresAt: Date.now() + SESSION_MAX_AGE_MS });
+  const session = jwt.sign({ sub: user.id, csrf: csrfToken, sid: sessionId }, JWT_SECRET, {
+    algorithm: 'HS256',
+    audience: 'codemagic-web',
+    expiresIn: '7d',
+    issuer: 'codemagic',
+  });
+
+  res.cookie(SESSION_COOKIE, session, {
+    httpOnly: true,
+    maxAge: SESSION_MAX_AGE_MS,
+    path: '/',
+    sameSite: 'lax',
+    secure: isProduction,
+  });
+  return csrfToken;
+}
+
+interface AuthRequest extends Request {
+  user?: User;
+  csrfToken?: string;
+  sessionId?: string;
+}
+
+type SessionClaims = jwt.JwtPayload & { sub?: string; csrf?: string; sid?: string };
+
 const authenticate = (req: AuthRequest, res: Response, next: NextFunction) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+  const session = req.cookies?.[SESSION_COOKIE];
+  if (typeof session !== 'string') {
     return next();
   }
-  const token = authHeader.split(' ')[1];
+
   try {
-    const payload = jwt.verify(token, JWT_SECRET) as { sub: string };
-    const user = users.get(payload.sub);
-    if (user) {
+    const payload = jwt.verify(session, JWT_SECRET, {
+      algorithms: ['HS256'],
+      audience: 'codemagic-web',
+      issuer: 'codemagic',
+    }) as SessionClaims;
+    const user = payload.sub ? users.get(payload.sub) : undefined;
+    const storedSession = typeof payload.sid === 'string' ? sessions.get(payload.sid) : undefined;
+    if (
+      user &&
+      storedSession &&
+      storedSession.expiresAt > Date.now() &&
+      storedSession.userId === user.id &&
+      typeof payload.csrf === 'string'
+    ) {
       req.user = user;
+      req.csrfToken = payload.csrf;
+      req.sessionId = payload.sid;
+    } else if (typeof payload.sid === 'string') {
+      sessions.delete(payload.sid);
     }
-  } catch (err) {
-    // invalid token
+  } catch {
+    res.clearCookie(SESSION_COOKIE, { path: '/', sameSite: 'lax', secure: isProduction });
   }
   next();
 };
@@ -389,25 +535,38 @@ const requireAuth = (req: AuthRequest, res: Response, next: NextFunction) => {
   next();
 };
 
+const requireCsrf = (req: AuthRequest, res: Response, next: NextFunction) => {
+  const supplied = req.get('x-csrf-token');
+  const expected = req.csrfToken;
+  if (!supplied || !expected) {
+    return res.status(403).json({ detail: 'A valid CSRF token is required.' });
+  }
+
+  const suppliedBuffer = Buffer.from(supplied, 'utf8');
+  const expectedBuffer = Buffer.from(expected, 'utf8');
+  if (suppliedBuffer.length !== expectedBuffer.length || !timingSafeEqual(suppliedBuffer, expectedBuffer)) {
+    return res.status(403).json({ detail: 'A valid CSRF token is required.' });
+  }
+  next();
+};
+
 app.use(authenticate);
 
-// === AUTH ROUTES (Preserving FastAPI app/api/auth.py contract) ===
-app.post('/api/auth/register', async (req: Request, res: Response) => {
-  const { email, password, name } = req.body;
-  if (!email || !password) {
-    return res.status(400).json({ detail: 'Email and password are required' });
+// === AUTH ROUTES ===
+app.post('/api/auth/register', authLimiter, async (req: Request, res: Response) => {
+  const parsed = registrationSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ detail: 'Provide a valid email, display name, and password of at least 12 characters.' });
+  }
+  const { email, password, name } = parsed.data;
+
+  if (findUserByEmail(email)) {
+    return res.status(409).json({ detail: 'Unable to create an account with those details.' });
   }
 
-  // Check if user already exists
-  for (const u of users.values()) {
-    if (u.email.toLowerCase() === email.toLowerCase()) {
-      return res.status(400).json({ detail: 'Email already registered' });
-    }
-  }
-
-  const hashedPassword = await bcrypt.hash(password, 10);
+  const hashedPassword = await bcrypt.hash(password, 12);
   const newUser: User = {
-    id: `usr-${Date.now()}`,
+    id: `usr-${randomUUID()}`,
     email,
     name: name || email.split('@')[0],
     hashedPassword,
@@ -417,85 +576,102 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
   };
 
   users.set(newUser.id, newUser);
-
-  const token = jwt.sign({ sub: newUser.id }, JWT_SECRET, { expiresIn: '7d' });
-  return res.json({
-    id: newUser.id,
-    email: newUser.email,
-    name: newUser.name,
-    access_token: token,
-    token_type: 'bearer',
-  });
+  return res.status(201).json({ user: toPublicUser(newUser), csrfToken: issueSession(res, newUser) });
 });
 
-app.post('/api/auth/login', async (req: Request, res: Response) => {
-  const { email, password } = req.body;
-  if (!email || !password) {
-    return res.status(400).json({ detail: 'Email and password required' });
+app.post('/api/auth/login', authLimiter, async (req: Request, res: Response) => {
+  const parsed = loginSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ detail: 'Invalid email or password.' });
   }
+  const { email, password } = parsed.data;
 
-  let matchedUser: User | undefined;
-  for (const u of users.values()) {
-    if (u.email.toLowerCase() === email.toLowerCase()) {
-      matchedUser = u;
-      break;
-    }
-  }
+  const matchedUser = findUserByEmail(email);
 
-  if (!matchedUser || !bcrypt.compareSync(password, matchedUser.hashedPassword)) {
+  if (!matchedUser || !(await bcrypt.compare(password, matchedUser.hashedPassword))) {
     return res.status(401).json({ detail: 'Invalid credentials' });
   }
 
-  const token = jwt.sign({ sub: matchedUser.id }, JWT_SECRET, { expiresIn: '7d' });
   return res.json({
-    access_token: token,
-    token_type: 'bearer',
-    user: {
-      id: matchedUser.id,
-      email: matchedUser.email,
-      name: matchedUser.name,
-      score: matchedUser.score,
-      solvedProblemIds: matchedUser.solvedProblemIds,
-    },
+    user: toPublicUser(matchedUser),
+    csrfToken: issueSession(res, matchedUser),
   });
 });
 
 app.get('/api/auth/me', (req: AuthRequest, res: Response) => {
-  if (!req.user) {
-    return res.status(401).json({ detail: 'Not authenticated' });
-  }
-  return res.json({
-    id: req.user.id,
-    email: req.user.email,
-    name: req.user.name,
-    score: req.user.score,
-    solvedProblemIds: req.user.solvedProblemIds,
-  });
+  if (!req.user || !req.csrfToken) return res.status(401).json({ detail: 'Not authenticated' });
+  return res.json({ user: toPublicUser(req.user), csrfToken: req.csrfToken });
 });
 
-// Also support legacy FastAPI route paths (/auth/register, /auth/login)
-app.post('/auth/register', (req, res) => res.redirect(307, '/api/auth/register'));
-app.post('/auth/login', (req, res) => res.redirect(307, '/api/auth/login'));
+app.post('/api/auth/logout', requireAuth, requireCsrf, (req: AuthRequest, res: Response) => {
+  if (req.sessionId) sessions.delete(req.sessionId);
+  res.clearCookie(SESSION_COOKIE, { path: '/', sameSite: 'lax', secure: isProduction });
+  return res.status(204).send();
+});
+
+const languageSchema = z.enum(['javascript', 'typescript', 'python', 'cpp', 'java']);
+const jsonInputSchema = z.string().min(1).max(10_000).refine(value => {
+  try {
+    JSON.parse(value);
+    return true;
+  } catch {
+    return false;
+  }
+}, 'must be valid JSON');
+const starterCodeSchema = z.object({
+  javascript: z.string().max(50_000),
+  typescript: z.string().max(50_000),
+  python: z.string().max(50_000),
+  cpp: z.string().max(50_000),
+  java: z.string().max(50_000),
+}).strict();
+const problemSchema = z.object({
+  title: z.string().trim().min(3).max(120).regex(/[a-z0-9]/i),
+  difficulty: z.enum(['Easy', 'Medium', 'Hard']),
+  category: z.string().trim().min(2).max(80),
+  tags: z.array(z.string().trim().min(1).max(40)).min(1).max(12),
+  description: z.string().trim().min(10).max(10_000),
+  examples: z.array(z.object({
+    input: z.string().max(2_000),
+    output: z.string().max(2_000),
+    explanation: z.string().max(5_000).optional(),
+  }).strict()).max(10),
+  constraints: z.array(z.string().trim().min(1).max(500)).max(20),
+  starterCode: starterCodeSchema,
+  testCases: z.array(z.object({
+    input: jsonInputSchema,
+    expectedOutput: z.string().min(1).max(10_000),
+    isHidden: z.boolean().optional(),
+  }).strict()).min(1).max(100),
+}).strict();
+const codeRequestSchema = z.object({
+  code: z.string().min(1).max(50_000),
+  language: languageSchema.default('javascript'),
+  customInput: jsonInputSchema.optional(),
+}).strict();
 
 // === PROBLEMS ROUTES ===
-app.get('/api/problems', (req: Request, res: Response) => {
-  const { difficulty, category, search, tag } = req.query;
+app.get('/api/problems', requireAuth, (req: AuthRequest, res: Response) => {
+  const difficulty = typeof req.query.difficulty === 'string' ? req.query.difficulty : undefined;
+  const category = typeof req.query.category === 'string' ? req.query.category : undefined;
+  const search = typeof req.query.search === 'string' ? req.query.search : undefined;
+  const tag = typeof req.query.tag === 'string' ? req.query.tag : undefined;
   let list = Array.from(problems.values());
 
   if (difficulty && difficulty !== 'All') {
-    list = list.filter(p => p.difficulty.toLowerCase() === (difficulty as string).toLowerCase());
+    list = list.filter(p => p.difficulty.toLowerCase() === difficulty.toLowerCase());
   }
 
   if (category && category !== 'All') {
-    list = list.filter(p => p.category.toLowerCase() === (category as string).toLowerCase());
+    list = list.filter(p => p.category.toLowerCase() === category.toLowerCase());
   }
 
   if (tag) {
-    list = list.filter(p => p.tags.some(t => t.toLowerCase() === (tag as string).toLowerCase()));
+    list = list.filter(p => p.tags.some(t => t.toLowerCase() === tag.toLowerCase()));
   }
 
   if (search) {
-    const q = (search as string).toLowerCase();
+    const q = search.toLowerCase();
     list = list.filter(
       p =>
         p.title.toLowerCase().includes(q) ||
@@ -520,8 +696,9 @@ app.get('/api/problems', (req: Request, res: Response) => {
   return res.json(summaries);
 });
 
-app.get('/api/problems/:id', (req: Request, res: Response) => {
-  const problem = problems.get(req.params.id);
+app.get('/api/problems/:id', requireAuth, (req: AuthRequest, res: Response) => {
+  const problemId = typeof req.params.id === 'string' ? req.params.id : '';
+  const problem = problems.get(problemId);
   if (!problem) {
     return res.status(404).json({ detail: 'Problem not found' });
   }
@@ -540,16 +717,16 @@ app.get('/api/problems/:id', (req: Request, res: Response) => {
   });
 });
 
-app.post('/api/problems', (req: AuthRequest, res: Response) => {
-  const { title, difficulty, category, tags, description, examples, constraints, starterCode, testCases } = req.body;
-
-  if (!title || !description || !testCases || !testCases.length) {
-    return res.status(400).json({ detail: 'Title, description and at least 1 testcase required' });
+app.post('/api/problems', writeLimiter, requireAuth, requireCsrf, (req: AuthRequest, res: Response) => {
+  const parsed = problemSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ detail: 'The problem payload is invalid or exceeds an allowed limit.' });
   }
+  const { title, difficulty, category, tags, description, examples, constraints, starterCode, testCases } = parsed.data;
 
   const id = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
   if (problems.has(id)) {
-    return res.status(400).json({ detail: 'Problem with similar title already exists' });
+    return res.status(409).json({ detail: 'A problem with a similar title already exists.' });
   }
 
   const newProblem: Problem = {
@@ -577,211 +754,56 @@ app.post('/api/problems', (req: AuthRequest, res: Response) => {
   };
 
   problems.set(newProblem.id, newProblem);
-  return res.status(201).json(newProblem);
+  return res.status(201).json({
+    ...newProblem,
+    testCases: newProblem.testCases.map((testCase, index) => ({
+      id: index,
+      input: testCase.input,
+      expectedOutput: testCase.isHidden ? 'Hidden testcase' : testCase.expectedOutput,
+      isHidden: Boolean(testCase.isHidden),
+    })),
+  });
 });
 
-// Helper for executing JavaScript/TypeScript logic in an evaluation sandbox
-function executeSolution(code: string, inputJson: string, language: string): { output: any; error?: string } {
-  try {
-    const inputObj = JSON.parse(inputJson);
-    const args = Object.values(inputObj);
-
-    // Prepare execution harness
-    if (language === 'javascript' || language === 'typescript') {
-      const runner = new Function(
-        'args',
-        `
-        try {
-          ${code}
-          // Find defined functions in scope
-          const fns = [twoSum, isValid, lengthOfLongestSubstring, coinChange, trap, merge].filter(f => typeof f === 'function');
-          if (fns.length > 0) {
-            return { result: fns[0](...args) };
-          }
-          // If custom user function
-          const allProps = Object.getOwnPropertyNames(this);
-          for (let p of allProps) {
-            if (typeof this[p] === 'function' && p !== 'eval') {
-              return { result: this[p](...args) };
-            }
-          }
-          return { error: 'No executable function found in solution' };
-        } catch(e) {
-          return { error: e.message || String(e) };
-        }
-        `
-      );
-      const res = runner(args);
-      if (res.error) {
-        return { output: null, error: res.error };
-      }
-      return { output: res.result };
-    } else {
-      // For Python/C++/Java in client sandbox mode, simulate execution with algorithmic verification
-      // If the code is well formed, let's verify via standard simulation
-      return { output: 'Simulation executed successfully in ' + language };
-    }
-  } catch (err: any) {
-    return { output: null, error: err.message || 'Execution error' };
-  }
-}
-
-// Compare outputs with type forgiveness (e.g. array order, boolean strings, JSON stringify)
-function compareOutputs(actual: any, expectedStr: string): boolean {
-  try {
-    if (actual === undefined || actual === null) {
-      return expectedStr === 'null' || expectedStr === 'undefined';
-    }
-    const actualStr = JSON.stringify(actual);
-    const expectedNormalized = expectedStr.trim();
-
-    if (actualStr === expectedNormalized) return true;
-    if (String(actual) === expectedNormalized) return true;
-
-    // Check parsed JSON equality
-    const expectedParsed = JSON.parse(expectedNormalized);
-    if (JSON.stringify(actual) === JSON.stringify(expectedParsed)) return true;
-
-    // Check array equality regardless of inner whitespace
-    if (Array.isArray(actual) && Array.isArray(expectedParsed)) {
-      return JSON.stringify(actual) === JSON.stringify(expectedParsed);
-    }
-
-    return false;
-  } catch (e) {
-    return String(actual).trim() === expectedStr.trim();
-  }
-}
+const judgeUnavailable = (res: Response) => res.status(503).json({
+  code: 'JUDGE_UNAVAILABLE',
+  detail: 'Code execution is unavailable until an isolated judge service is configured.',
+});
 
 // === RUN / TEST CODE ===
-app.post('/api/problems/:id/run', (req: Request, res: Response) => {
-  const { id } = req.params;
-  const { code, language, customInput } = req.body;
+app.post('/api/problems/:id/run', writeLimiter, requireAuth, requireCsrf, (req: AuthRequest, res: Response) => {
+  const id = typeof req.params.id === 'string' ? req.params.id : '';
   const problem = problems.get(id);
 
   if (!problem) {
     return res.status(404).json({ detail: 'Problem not found' });
   }
-
-  const startTime = performance.now();
-  const casesToRun = customInput
-    ? [{ input: customInput, expectedOutput: '', isCustom: true }]
-    : problem.testCases.filter(tc => !tc.isHidden);
-
-  const results = casesToRun.map((tc, index) => {
-    const execStart = performance.now();
-    const { output, error } = executeSolution(code, tc.input, language || 'javascript');
-    const execEnd = performance.now();
-
-    const isPassed = !error && (tc.isCustom ? true : compareOutputs(output, tc.expectedOutput));
-
-    return {
-      testCaseIndex: index + 1,
-      input: tc.input,
-      expectedOutput: tc.expectedOutput,
-      actualOutput: output !== undefined ? (typeof output === 'object' ? JSON.stringify(output) : String(output)) : '',
-      passed: isPassed,
-      error: error || null,
-      runtimeMs: Math.round((execEnd - execStart) * 100) / 100,
-    };
-  });
-
-  const totalTime = Math.round((performance.now() - startTime) * 100) / 100;
-  return res.json({
-    results,
-    totalRuntimeMs: totalTime,
-    allPassed: results.every(r => r.passed),
-  });
+  if (!codeRequestSchema.safeParse(req.body).success) {
+    return res.status(400).json({ detail: 'The code request is invalid or exceeds an allowed limit.' });
+  }
+  return judgeUnavailable(res);
 });
 
 // === SUBMIT SOLUTION (Judge Engine) ===
-app.post('/api/problems/:id/submit', (req: AuthRequest, res: Response) => {
-  const { id } = req.params;
-  const { code, language } = req.body;
+app.post('/api/problems/:id/submit', writeLimiter, requireAuth, requireCsrf, (req: AuthRequest, res: Response) => {
+  const id = typeof req.params.id === 'string' ? req.params.id : '';
   const problem = problems.get(id);
 
   if (!problem) {
     return res.status(404).json({ detail: 'Problem not found' });
   }
-
-  const startTime = performance.now();
-  let passedCount = 0;
-  let firstError: string | undefined;
-  let status: Submission['status'] = 'Accepted';
-
-  for (let i = 0; i < problem.testCases.length; i++) {
-    const tc = problem.testCases[i];
-    const { output, error } = executeSolution(code, tc.input, language || 'javascript');
-
-    if (error) {
-      status = 'Runtime Error';
-      firstError = error;
-      break;
-    }
-
-    if (!compareOutputs(output, tc.expectedOutput)) {
-      status = 'Wrong Answer';
-      firstError = `Failed on testcase #${i + 1}. Expected ${tc.expectedOutput}, got ${JSON.stringify(output)}`;
-      break;
-    }
-
-    passedCount++;
+  if (!codeRequestSchema.safeParse(req.body).success) {
+    return res.status(400).json({ detail: 'The code request is invalid or exceeds an allowed limit.' });
   }
-
-  const totalRuntimeMs = Math.max(12, Math.round(performance.now() - startTime));
-  const memoryKb = Math.floor(34000 + Math.random() * 8000);
-
-  // Update problem stats
-  problem.totalSubmissions = (problem.totalSubmissions || 0) + 1;
-  if (status === 'Accepted') {
-    problem.acceptedSubmissions = (problem.acceptedSubmissions || 0) + 1;
-  }
-  problem.acceptanceRate = `${Math.round(((problem.acceptedSubmissions || 0) / (problem.totalSubmissions || 1)) * 1000) / 10}%`;
-
-  const user = req.user || demoUser;
-
-  // If user solved problem, mark solved
-  if (status === 'Accepted' && !user.solvedProblemIds.includes(problem.id)) {
-    user.solvedProblemIds.push(problem.id);
-    const scoreMap = { Easy: 20, Medium: 50, Hard: 100 };
-    user.score += scoreMap[problem.difficulty] || 20;
-  }
-
-  const submissionRecord: Submission = {
-    id: `sub-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-    problemId: problem.id,
-    problemTitle: problem.title,
-    userId: user.id,
-    userEmail: user.email,
-    userName: user.name,
-    language: language || 'javascript',
-    code,
-    status,
-    passedCount,
-    totalTestCases: problem.testCases.length,
-    runtimeMs: totalRuntimeMs,
-    memoryKb,
-    createdAt: new Date().toISOString(),
-    errorDetail: firstError,
-  };
-
-  submissions.unshift(submissionRecord);
-
-  return res.json({
-    submission: submissionRecord,
-    userSolved: user.solvedProblemIds,
-  });
+  return judgeUnavailable(res);
 });
 
 // === SUBMISSION HISTORY ===
-app.get('/api/submissions', (req: Request, res: Response) => {
-  const { problemId, userId } = req.query;
-  let list = submissions;
+app.get('/api/submissions', requireAuth, (req: AuthRequest, res: Response) => {
+  const problemId = typeof req.query.problemId === 'string' ? req.query.problemId : undefined;
+  let list = submissions.filter(submission => submission.userId === req.user!.id);
   if (problemId) {
-    list = list.filter(s => s.problemId === problemId);
-  }
-  if (userId) {
-    list = list.filter(s => s.userId === userId);
+    list = list.filter(submission => submission.problemId === problemId);
   }
   return res.json(list.slice(0, 50));
 });
@@ -792,7 +814,6 @@ app.get('/api/leaderboard', (req: Request, res: Response) => {
     .map(u => ({
       id: u.id,
       name: u.name,
-      email: u.email,
       score: u.score,
       solvedCount: u.solvedProblemIds.length,
       createdAt: u.createdAt,
@@ -802,25 +823,43 @@ app.get('/api/leaderboard', (req: Request, res: Response) => {
   return res.json(rankList);
 });
 
-// Mount Vite in development or serve static in production
+app.use('/api', (_req, res) => {
+  res.status(404).json({ detail: 'API endpoint not found.' });
+});
+
+app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  console.error('Unhandled request error', error);
+  if (res.headersSent) return;
+  res.status(500).json({ detail: 'An unexpected server error occurred.' });
+});
+
+// This process is a development shell only. A production deployment needs durable
+// persistence and a separately sandboxed judge worker before it can serve traffic.
 async function startServer() {
-  if (process.env.NODE_ENV === 'production') {
-    app.use(express.static(path.join(__dirname, 'dist')));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(__dirname, 'dist', 'index.html'));
-    });
-  } else {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
+  if (isProduction) {
+    throw new Error('Production startup is disabled until persistent storage and an isolated judge worker are configured.');
+  }
+  if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+    throw new Error('PORT must be an integer between 1 and 65535.');
   }
 
+  const { createServer: createViteServer } = await import('vite');
+  const vite = await createViteServer({
+    server: { middlewareMode: true },
+    appType: 'mpa',
+  });
+  app.use(vite.middlewares);
+
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 CodeMagic server running on http://0.0.0.0:${PORT}`);
+    console.log(`CodeMagic server running on http://0.0.0.0:${PORT}`);
   });
 }
 
-startServer();
+export { app };
+
+if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+  void startServer().catch(error => {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  });
+}

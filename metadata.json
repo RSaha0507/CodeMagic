@@ -1,6 +1,6 @@
 {
   "name": "CodeMagic",
-  "description": "Interactive coding practice platform and online judge with rich problem sets, code runner, test cases, submissions, and leaderboards.",
+  "description": "Interactive coding-practice platform with visual learning, curated problem sets, account registration, and local development data.",
   "requestFramePermissions": [],
-  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "capabilities": []
 }

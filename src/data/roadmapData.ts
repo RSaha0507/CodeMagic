@@ -15,7 +15,7 @@ export const careerTracks: CareerTrack[] = [
     title: 'Software Engineer DSA Career Path',
     roleTarget: 'L3 / L4 SWE (Google, Meta, Amazon, Startups)',
     description:
-      'Master core data structures and algorithms visually with code-level step execution, time/space complexity analysis, and direct online judge problem links.',
+      'Master core data structures and algorithms visually with code-level step execution, time/space complexity analysis, and direct practice-problem links.',
     totalModules: 6,
     estimatedHours: 40,
   },

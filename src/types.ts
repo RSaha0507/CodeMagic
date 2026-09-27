@@ -43,7 +43,6 @@ export interface Submission {
   problemId: string;
   problemTitle: string;
   userId: string;
-  userEmail: string;
   userName: string;
   language: string;
   code: string;
@@ -67,7 +66,6 @@ export interface User {
 export interface LeaderboardUser {
   id: string;
   name: string;
-  email: string;
   score: number;
   solvedCount: number;
   createdAt: string;
