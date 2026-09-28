@@ -36,7 +36,7 @@ export function Navbar({
   solvedCount,
 }: NavbarProps) {
   return (
-    <header className="sticky top-0 z-40 border-b border-zinc-800 bg-zinc-950/90 backdrop-blur">
+    <header className="sticky top-0 z-40 bg-zinc-950/90 backdrop-blur">
       <div className="mx-auto flex min-h-24 max-w-7xl items-center gap-3 px-4 py-2 sm:px-6 lg:px-8">
         <a href={pagePaths.home} className="brand-lockup shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400" aria-label="CodeMagic home">
           <span className="brand-mark" aria-hidden="true"><img src="/brand/codemagic-official.png" alt="" /></span>
@@ -50,7 +50,7 @@ export function Navbar({
               aria-current={currentPage === id ? 'page' : undefined}
               className={cn(
                 buttonVariants({ variant: 'ghost', size: 'sm' }),
-                'shrink-0',
+                'tab-button shrink-0',
                 currentPage === id && 'nav-active bg-zinc-800 text-zinc-100 hover:bg-zinc-800'
               )}
             >

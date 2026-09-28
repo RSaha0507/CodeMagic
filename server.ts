@@ -9,6 +9,25 @@ import helmet from 'helmet';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { z } from 'zod';
+import { closeDatabase } from './src/db/client';
+import { migrateDatabase } from './src/db/migrate';
+import {
+  createProblem as createDatabaseProblem,
+  createSession as createDatabaseSession,
+  createUser as createDatabaseUser,
+  deleteSession as deleteDatabaseSession,
+  getProblemDetail,
+  getSessionUser,
+  getUserByEmail,
+  listLeaderboard,
+  listProblems,
+  listSubmissions,
+  problemExists,
+  seedDemoUser,
+  seedProblems,
+  toPublicUser,
+} from './src/db/repository';
+import type { DatabaseUser, Difficulty, ProblemExample, ProblemTestCase, StarterCode } from './src/db/schema';
 
 const __filename = fileURLToPath(import.meta.url);
 
@@ -83,79 +102,25 @@ const writeLimiter = rateLimit({
 app.use('/api', apiLimiter);
 
 // In-Memory Data Models & Seed Data
-interface User {
-  id: string;
-  email: string;
-  name: string;
-  hashedPassword: string;
-  solvedProblemIds: string[];
-  createdAt: string;
-  score: number;
-}
-
-interface TestCase {
-  input: string;
-  expectedOutput: string;
-  isHidden?: boolean;
-}
-
 interface Problem {
   id: string;
   title: string;
   slug: string;
-  difficulty: 'Easy' | 'Medium' | 'Hard';
+  difficulty: Difficulty;
   category: string;
   tags: string[];
   description: string;
-  examples: {
-    input: string;
-    output: string;
-    explanation?: string;
-  }[];
+  examples: ProblemExample[];
   constraints: string[];
-  starterCode: {
-    javascript: string;
-    typescript: string;
-    python: string;
-    cpp: string;
-    java: string;
-  };
-  testCases: TestCase[];
+  starterCode: StarterCode;
+  testCases: ProblemTestCase[];
   author?: string;
   acceptanceRate?: string;
   totalSubmissions?: number;
   acceptedSubmissions?: number;
 }
 
-interface Submission {
-  id: string;
-  problemId: string;
-  problemTitle: string;
-  userId: string;
-  userName: string;
-  language: string;
-  code: string;
-  status: 'Accepted' | 'Wrong Answer' | 'Runtime Error' | 'Time Limit Exceeded' | 'Compilation Error';
-  passedCount: number;
-  totalTestCases: number;
-  runtimeMs: number;
-  memoryKb: number;
-  createdAt: string;
-  errorDetail?: string;
-}
-
-interface Session {
-  userId: string;
-  expiresAt: number;
-}
-
-// Initial In-Memory Store
-const users: Map<string, User> = new Map();
-const problems: Map<string, Problem> = new Map();
-const submissions: Submission[] = [];
-const sessions: Map<string, Session> = new Map();
-
-// Seed Rich Problem Set
+// Seed catalog for the explicit `npm run db:seed` command.
 const initialProblems: Problem[] = [
   {
     id: 'two-sum',
@@ -416,21 +381,19 @@ const initialProblems: Problem[] = [
   },
 ];
 
-initialProblems.forEach(p => problems.set(p.id, p));
+export async function seedDatabase(): Promise<void> {
+  await seedProblems(initialProblems);
 
-// This account exists only in the in-memory development shell. It is deliberately
-// excluded from production, where startup is disabled until durable auth exists.
-if (!isProduction && process.env.NODE_ENV !== 'test') {
-  const demoUser: User = {
-    id: 'usr-demo-codemagic',
-    email: 'demo@codemagic.local',
-    name: 'Demo Learner',
-    hashedPassword: '$2a$12$JD3xImCFmu3NQBa.uVm7ouxQxKWvnsXPMyWY7lYxcW60CPt7U73..',
-    solvedProblemIds: ['two-sum', 'valid-parentheses'],
-    createdAt: '2026-01-01T00:00:00.000Z',
-    score: 100,
-  };
-  users.set(demoUser.id, demoUser);
+  if (!isProduction) {
+    await seedDemoUser({
+      id: 'usr-demo-codemagic',
+      email: 'demo@codemagic.local',
+      name: 'Demo Learner',
+      passwordHash: '$2a$12$JD3xImCFmu3NQBa.uVm7ouxQxKWvnsXPMyWY7lYxcW60CPt7U73..',
+      solvedProblemIds: ['two-sum', 'valid-parentheses'],
+      score: 100,
+    });
+  }
 }
 
 const registrationSchema = z.object({
@@ -444,32 +407,9 @@ const loginSchema = z.object({
   password: z.string().min(1).max(128),
 }).strict();
 
-function toPublicUser(user: User) {
-  return {
-    id: user.id,
-    email: user.email,
-    name: user.name,
-    score: user.score,
-    solvedProblemIds: user.solvedProblemIds,
-  };
-}
-
-function findUserByEmail(email: string): User | undefined {
-  return Array.from(users.values()).find(user => user.email === email);
-}
-
-function removeExpiredSessions(): void {
-  const now = Date.now();
-  for (const [sessionId, session] of sessions) {
-    if (session.expiresAt <= now) sessions.delete(sessionId);
-  }
-}
-
-function issueSession(res: Response, user: User): string {
-  removeExpiredSessions();
+async function issueSession(res: Response, user: DatabaseUser): Promise<string> {
   const csrfToken = randomBytes(32).toString('base64url');
-  const sessionId = randomUUID();
-  sessions.set(sessionId, { userId: user.id, expiresAt: Date.now() + SESSION_MAX_AGE_MS });
+  const sessionId = await createDatabaseSession(user.id, new Date(Date.now() + SESSION_MAX_AGE_MS));
   const session = jwt.sign({ sub: user.id, csrf: csrfToken, sid: sessionId }, JWT_SECRET, {
     algorithm: 'HS256',
     audience: 'codemagic-web',
@@ -488,17 +428,22 @@ function issueSession(res: Response, user: User): string {
 }
 
 interface AuthRequest extends Request {
-  user?: User;
+  user?: DatabaseUser;
   csrfToken?: string;
   sessionId?: string;
 }
 
 type SessionClaims = jwt.JwtPayload & { sub?: string; csrf?: string; sid?: string };
 
-const authenticate = (req: AuthRequest, res: Response, next: NextFunction) => {
+const asyncHandler = (handler: (req: any, res: Response, next: NextFunction) => Promise<unknown>) => (req: Request, res: Response, next: NextFunction) => {
+  void handler(req, res, next).catch(next);
+};
+
+const authenticate = asyncHandler(async (req: AuthRequest, res: Response, next: NextFunction) => {
   const session = req.cookies?.[SESSION_COOKIE];
   if (typeof session !== 'string') {
-    return next();
+    next();
+    return;
   }
 
   try {
@@ -507,26 +452,19 @@ const authenticate = (req: AuthRequest, res: Response, next: NextFunction) => {
       audience: 'codemagic-web',
       issuer: 'codemagic',
     }) as SessionClaims;
-    const user = payload.sub ? users.get(payload.sub) : undefined;
-    const storedSession = typeof payload.sid === 'string' ? sessions.get(payload.sid) : undefined;
-    if (
-      user &&
-      storedSession &&
-      storedSession.expiresAt > Date.now() &&
-      storedSession.userId === user.id &&
-      typeof payload.csrf === 'string'
-    ) {
+    const user = typeof payload.sid === 'string' ? await getSessionUser(payload.sid) : undefined;
+    if (user && payload.sub === user.id && typeof payload.csrf === 'string') {
       req.user = user;
       req.csrfToken = payload.csrf;
       req.sessionId = payload.sid;
     } else if (typeof payload.sid === 'string') {
-      sessions.delete(payload.sid);
+      await deleteDatabaseSession(payload.sid);
     }
   } catch {
     res.clearCookie(SESSION_COOKIE, { path: '/', sameSite: 'lax', secure: isProduction });
   }
   next();
-};
+});
 
 const requireAuth = (req: AuthRequest, res: Response, next: NextFunction) => {
   if (!req.user) {
@@ -553,61 +491,58 @@ const requireCsrf = (req: AuthRequest, res: Response, next: NextFunction) => {
 app.use(authenticate);
 
 // === AUTH ROUTES ===
-app.post('/api/auth/register', authLimiter, async (req: Request, res: Response) => {
+app.post('/api/auth/register', authLimiter, asyncHandler(async (req: Request, res: Response) => {
   const parsed = registrationSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ detail: 'Provide a valid email, display name, and password of at least 12 characters.' });
   }
   const { email, password, name } = parsed.data;
 
-  if (findUserByEmail(email)) {
+  if (await getUserByEmail(email)) {
     return res.status(409).json({ detail: 'Unable to create an account with those details.' });
   }
 
   const hashedPassword = await bcrypt.hash(password, 12);
-  const newUser: User = {
+  const newUser = await createDatabaseUser({
     id: `usr-${randomUUID()}`,
     email,
     name: name || email.split('@')[0],
-    hashedPassword,
-    solvedProblemIds: [],
-    createdAt: new Date().toISOString(),
+    passwordHash: hashedPassword,
     score: 0,
-  };
+  });
 
-  users.set(newUser.id, newUser);
-  return res.status(201).json({ user: toPublicUser(newUser), csrfToken: issueSession(res, newUser) });
-});
+  return res.status(201).json({ user: await toPublicUser(newUser), csrfToken: await issueSession(res, newUser) });
+}));
 
-app.post('/api/auth/login', authLimiter, async (req: Request, res: Response) => {
+app.post('/api/auth/login', authLimiter, asyncHandler(async (req: Request, res: Response) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ detail: 'Invalid email or password.' });
   }
   const { email, password } = parsed.data;
 
-  const matchedUser = findUserByEmail(email);
+  const matchedUser = await getUserByEmail(email);
 
-  if (!matchedUser || !(await bcrypt.compare(password, matchedUser.hashedPassword))) {
+  if (!matchedUser || !(await bcrypt.compare(password, matchedUser.passwordHash))) {
     return res.status(401).json({ detail: 'Invalid credentials' });
   }
 
   return res.json({
-    user: toPublicUser(matchedUser),
-    csrfToken: issueSession(res, matchedUser),
+    user: await toPublicUser(matchedUser),
+    csrfToken: await issueSession(res, matchedUser),
   });
-});
+}));
 
-app.get('/api/auth/me', (req: AuthRequest, res: Response) => {
+app.get('/api/auth/me', asyncHandler(async (req: AuthRequest, res: Response) => {
   if (!req.user || !req.csrfToken) return res.status(401).json({ detail: 'Not authenticated' });
-  return res.json({ user: toPublicUser(req.user), csrfToken: req.csrfToken });
-});
+  return res.json({ user: await toPublicUser(req.user), csrfToken: req.csrfToken });
+}));
 
-app.post('/api/auth/logout', requireAuth, requireCsrf, (req: AuthRequest, res: Response) => {
-  if (req.sessionId) sessions.delete(req.sessionId);
+app.post('/api/auth/logout', requireAuth, requireCsrf, asyncHandler(async (req: AuthRequest, res: Response) => {
+  if (req.sessionId) await deleteDatabaseSession(req.sessionId);
   res.clearCookie(SESSION_COOKIE, { path: '/', sameSite: 'lax', secure: isProduction });
   return res.status(204).send();
-});
+}));
 
 const languageSchema = z.enum(['javascript', 'typescript', 'python', 'cpp', 'java']);
 const jsonInputSchema = z.string().min(1).max(10_000).refine(value => {
@@ -651,73 +586,25 @@ const codeRequestSchema = z.object({
 }).strict();
 
 // === PROBLEMS ROUTES ===
-app.get('/api/problems', requireAuth, (req: AuthRequest, res: Response) => {
+app.get('/api/problems', requireAuth, asyncHandler(async (req: AuthRequest, res: Response) => {
   const difficulty = typeof req.query.difficulty === 'string' ? req.query.difficulty : undefined;
   const category = typeof req.query.category === 'string' ? req.query.category : undefined;
   const search = typeof req.query.search === 'string' ? req.query.search : undefined;
   const tag = typeof req.query.tag === 'string' ? req.query.tag : undefined;
-  let list = Array.from(problems.values());
+  return res.json(await listProblems({ difficulty, category, search, tag }));
+}));
 
-  if (difficulty && difficulty !== 'All') {
-    list = list.filter(p => p.difficulty.toLowerCase() === difficulty.toLowerCase());
-  }
-
-  if (category && category !== 'All') {
-    list = list.filter(p => p.category.toLowerCase() === category.toLowerCase());
-  }
-
-  if (tag) {
-    list = list.filter(p => p.tags.some(t => t.toLowerCase() === tag.toLowerCase()));
-  }
-
-  if (search) {
-    const q = search.toLowerCase();
-    list = list.filter(
-      p =>
-        p.title.toLowerCase().includes(q) ||
-        p.tags.some(t => t.toLowerCase().includes(q)) ||
-        p.category.toLowerCase().includes(q)
-    );
-  }
-
-  // Return public problem summaries (strip hidden test cases)
-  const summaries = list.map(p => ({
-    id: p.id,
-    title: p.title,
-    slug: p.slug,
-    difficulty: p.difficulty,
-    category: p.category,
-    tags: p.tags,
-    acceptanceRate: p.acceptanceRate,
-    totalSubmissions: p.totalSubmissions,
-    testCasesCount: p.testCases.length,
-  }));
-
-  return res.json(summaries);
-});
-
-app.get('/api/problems/:id', requireAuth, (req: AuthRequest, res: Response) => {
+app.get('/api/problems/:id', requireAuth, asyncHandler(async (req: AuthRequest, res: Response) => {
   const problemId = typeof req.params.id === 'string' ? req.params.id : '';
-  const problem = problems.get(problemId);
+  const problem = await getProblemDetail(problemId);
   if (!problem) {
     return res.status(404).json({ detail: 'Problem not found' });
   }
 
-  // Exclude hidden test cases from client inspection
-  const publicTestCases = problem.testCases.map((tc, idx) => ({
-    id: idx,
-    input: tc.input,
-    expectedOutput: tc.isHidden ? 'Hidden testcase' : tc.expectedOutput,
-    isHidden: !!tc.isHidden,
-  }));
+  return res.json(problem);
+}));
 
-  return res.json({
-    ...problem,
-    testCases: publicTestCases,
-  });
-});
-
-app.post('/api/problems', writeLimiter, requireAuth, requireCsrf, (req: AuthRequest, res: Response) => {
+app.post('/api/problems', writeLimiter, requireAuth, requireCsrf, asyncHandler(async (req: AuthRequest, res: Response) => {
   const parsed = problemSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ detail: 'The problem payload is invalid or exceeds an allowed limit.' });
@@ -725,14 +612,13 @@ app.post('/api/problems', writeLimiter, requireAuth, requireCsrf, (req: AuthRequ
   const { title, difficulty, category, tags, description, examples, constraints, starterCode, testCases } = parsed.data;
 
   const id = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
-  if (problems.has(id)) {
+  if (await problemExists(id)) {
     return res.status(409).json({ detail: 'A problem with a similar title already exists.' });
   }
 
-  const newProblem: Problem = {
+  const newProblem = await createDatabaseProblem({
     id,
     title,
-    slug: id,
     difficulty: difficulty || 'Medium',
     category: category || 'General',
     tags: tags || ['Algorithm'],
@@ -747,23 +633,11 @@ app.post('/api/problems', writeLimiter, requireAuth, requireCsrf, (req: AuthRequ
       java: '// Write your solution here\nclass Solution {\n    public void solve() {}\n}',
     },
     testCases,
-    author: req.user?.name || 'Community',
-    totalSubmissions: 0,
-    acceptedSubmissions: 0,
-    acceptanceRate: '0%',
-  };
-
-  problems.set(newProblem.id, newProblem);
-  return res.status(201).json({
-    ...newProblem,
-    testCases: newProblem.testCases.map((testCase, index) => ({
-      id: index,
-      input: testCase.input,
-      expectedOutput: testCase.isHidden ? 'Hidden testcase' : testCase.expectedOutput,
-      isHidden: Boolean(testCase.isHidden),
-    })),
+    authorId: req.user!.id,
   });
-});
+
+  return res.status(201).json(newProblem);
+}));
 
 const judgeUnavailable = (res: Response) => res.status(503).json({
   code: 'JUDGE_UNAVAILABLE',
@@ -771,57 +645,41 @@ const judgeUnavailable = (res: Response) => res.status(503).json({
 });
 
 // === RUN / TEST CODE ===
-app.post('/api/problems/:id/run', writeLimiter, requireAuth, requireCsrf, (req: AuthRequest, res: Response) => {
+app.post('/api/problems/:id/run', writeLimiter, requireAuth, requireCsrf, asyncHandler(async (req: AuthRequest, res: Response) => {
   const id = typeof req.params.id === 'string' ? req.params.id : '';
-  const problem = problems.get(id);
 
-  if (!problem) {
+  if (!(await problemExists(id))) {
     return res.status(404).json({ detail: 'Problem not found' });
   }
   if (!codeRequestSchema.safeParse(req.body).success) {
     return res.status(400).json({ detail: 'The code request is invalid or exceeds an allowed limit.' });
   }
   return judgeUnavailable(res);
-});
+}));
 
 // === SUBMIT SOLUTION (Judge Engine) ===
-app.post('/api/problems/:id/submit', writeLimiter, requireAuth, requireCsrf, (req: AuthRequest, res: Response) => {
+app.post('/api/problems/:id/submit', writeLimiter, requireAuth, requireCsrf, asyncHandler(async (req: AuthRequest, res: Response) => {
   const id = typeof req.params.id === 'string' ? req.params.id : '';
-  const problem = problems.get(id);
 
-  if (!problem) {
+  if (!(await problemExists(id))) {
     return res.status(404).json({ detail: 'Problem not found' });
   }
   if (!codeRequestSchema.safeParse(req.body).success) {
     return res.status(400).json({ detail: 'The code request is invalid or exceeds an allowed limit.' });
   }
   return judgeUnavailable(res);
-});
+}));
 
 // === SUBMISSION HISTORY ===
-app.get('/api/submissions', requireAuth, (req: AuthRequest, res: Response) => {
+app.get('/api/submissions', requireAuth, asyncHandler(async (req: AuthRequest, res: Response) => {
   const problemId = typeof req.query.problemId === 'string' ? req.query.problemId : undefined;
-  let list = submissions.filter(submission => submission.userId === req.user!.id);
-  if (problemId) {
-    list = list.filter(submission => submission.problemId === problemId);
-  }
-  return res.json(list.slice(0, 50));
-});
+  return res.json(await listSubmissions(req.user!.id, problemId));
+}));
 
 // === LEADERBOARD ===
-app.get('/api/leaderboard', (req: Request, res: Response) => {
-  const rankList = Array.from(users.values())
-    .map(u => ({
-      id: u.id,
-      name: u.name,
-      score: u.score,
-      solvedCount: u.solvedProblemIds.length,
-      createdAt: u.createdAt,
-    }))
-    .sort((a, b) => b.score - a.score || b.solvedCount - a.solvedCount);
-
-  return res.json(rankList);
-});
+app.get('/api/leaderboard', requireAuth, asyncHandler(async (_req: AuthRequest, res: Response) => {
+  return res.json(await listLeaderboard());
+}));
 
 app.use('/api', (_req, res) => {
   res.status(404).json({ detail: 'API endpoint not found.' });
@@ -833,8 +691,8 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
   res.status(500).json({ detail: 'An unexpected server error occurred.' });
 });
 
-// This process is a development shell only. A production deployment needs durable
-// persistence and a separately sandboxed judge worker before it can serve traffic.
+// This process is a development shell only. A production deployment still needs a
+// separately sandboxed judge worker before it can serve untrusted submissions.
 async function startServer() {
   if (isProduction) {
     throw new Error('Production startup is disabled until persistent storage and an isolated judge worker are configured.');
@@ -842,6 +700,9 @@ async function startServer() {
   if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
     throw new Error('PORT must be an integer between 1 and 65535.');
   }
+
+  await migrateDatabase();
+  await seedDatabase();
 
   const { createServer: createViteServer } = await import('vite');
   const vite = await createViteServer({
@@ -858,8 +719,18 @@ async function startServer() {
 export { app };
 
 if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
-  void startServer().catch(error => {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-  });
+  if (process.argv.includes('--seed')) {
+    void seedDatabase()
+      .then(() => console.log('Database seed completed.'))
+      .catch(error => {
+        console.error(error instanceof Error ? error.message : error);
+        process.exitCode = 1;
+      })
+      .finally(() => closeDatabase());
+  } else {
+    void startServer().catch(error => {
+      console.error(error instanceof Error ? error.message : error);
+      process.exitCode = 1;
+    });
+  }
 }

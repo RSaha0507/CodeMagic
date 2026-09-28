@@ -6,7 +6,10 @@ import test from 'node:test';
 process.env.NODE_ENV = 'test';
 process.env.JWT_SECRET = 'test-only-secret-that-is-long-enough-to-be-valid';
 
+const { closeDatabase } = await import('../src/db/client.ts');
+const { migrateDatabase } = await import('../src/db/migrate.ts');
 const { app } = await import('../server.ts');
+const { seedDatabase } = await import('../server.ts');
 
 async function readResponse(response: Response): Promise<Record<string, unknown> | null> {
   const text = await response.text();
@@ -14,6 +17,8 @@ async function readResponse(response: Response): Promise<Record<string, unknown>
 }
 
 test('API security boundaries', async () => {
+  await migrateDatabase();
+  await seedDatabase();
   const server = app.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const address = server.address() as AddressInfo;
@@ -31,6 +36,9 @@ test('API security boundaries', async () => {
 
     const anonymousHistory = await request('/api/submissions');
     assert.equal(anonymousHistory.response.status, 401);
+
+    const anonymousLeaderboard = await request('/api/leaderboard');
+    assert.equal(anonymousLeaderboard.response.status, 401);
 
     const registration = await request('/api/auth/register', {
       method: 'POST',
@@ -87,6 +95,8 @@ test('API security boundaries', async () => {
     };
     const memberProblems = await request('/api/problems', { headers: { Cookie: cookie! } });
     assert.equal(memberProblems.response.status, 200);
+    assert.ok(Array.isArray(memberProblems.body));
+    assert.equal(memberProblems.body.length, 6);
     const createWithCsrf = await request('/api/problems', {
       method: 'POST',
       headers: authenticatedHeaders,
@@ -116,6 +126,9 @@ test('API security boundaries', async () => {
     assert.equal(privateHistory.response.status, 200);
     assert.deepEqual(privateHistory.body, []);
 
+    const leaderboard = await request('/api/leaderboard', { headers: { Cookie: cookie! } });
+    assert.equal(leaderboard.response.status, 200);
+
     const logout = await request('/api/auth/logout', {
       method: 'POST',
       headers: { Cookie: cookie!, 'X-CSRF-Token': csrfToken as string },
@@ -128,5 +141,6 @@ test('API security boundaries', async () => {
     await new Promise<void>((resolve, reject) => {
       server.close(error => error ? reject(error) : resolve());
     });
+    await closeDatabase();
   }
 });
